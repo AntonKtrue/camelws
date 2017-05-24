@@ -1,0 +1,1 @@
+insert into persons (user, first_name, last_name, city) values ('person2', 'Person2', 'Chirino', 'Tampa')insert into persons (user, first_name, last_name, city) values ('person2', 'Person2', 'Chirino', 'Tampa')insert into persons (user, first_name, last_name, city) values ('person2', 'Person2', 'Chirino', 'Tampa')

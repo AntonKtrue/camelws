@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<beans xmlns="http://www.springframework.org/schema/beans"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:spring="http://camel.apache.org/schema/spring"
+
+
+       xsi:schemaLocation="http://www.springframework.org/schema/beans
+       http://www.springframework.org/schema/beans/spring-beans.xsd http://camel.apache.org/schema/spring http://camel.apache.org/schema/spring/camel-spring.xsd">
+
+    <bean id="learndb" class="org.springframework.jdbc.datasource.DriverManagerDataSource">
+        <property name="driverClassName" value="com.mysql.jdbc.Driver"/>
+        <property name="url" value="jdbc:mysql://127.0.0.1:3306/learn"/>
+        <property name="username" value="root"/>
+        <property name="password" value="90559067"/>
+    </bean>
+    <bean id="fileToSQL" class="kaa.soft.cookbook.FileToSql"/>
+    <bean id="jmsConnectionFactory" class="org.apache.activemq.ActiveMQConnectionFactory">
+        <property name="brokerURL" value="tcp://localhost:61616"/>
+    </bean>
+    <bean id="jmsTransactionManager" class="org.springframework.jms.connection.JmsTransactionManager">
+        <property name="connectionFactory" ref="jmsConnectionFactory"/>
+    </bean>
+    <bean id="PROPAGATION_REQUIRED" class="org.apache.camel.spring.spi.SpringTransactionPolicy">
+        <property name="transactionManager" ref="jmsTransactionManager"/>
+    </bean>
+    <bean id="PROPAGATION_REQUIRES_NEW" class="org.apache.camel.spring.spi.SpringTransactionPolicy">
+        <property name="transactionManager" ref="jmsTransactionManager"/>
+        <property name="propagationBehaviorName" value="PROGPAGATION_REQUIRES_NEW"/>
+    </bean>
+    <bean id="personToSql" class="kaa.soft.cookbook.PersonToSqlBean"/>
+    <bean id="xPathBuilder" class="org.apache.camel.builder.xml.XPathBuilder">
+        <constructor-arg value="/persons/person"/>
+    </bean>
+    <bean id="myDataSource" class="org.springframework.jdbc.datasource.DriverManagerDataSource">
+        <property name="driverClassName" value="com.mysql.jdbc.Driver"/>
+        <property name="url" value="jdbc:mysql://localhost:3306/learn" />
+        <property name="username" value="root" />
+        <property name="password" value="90559067" />
+    </bean>
+    <spring:errorHandler id="deadLetterErrorHandler" type="DeadLetterChannel" deadLetterUri="file:src/data/error?fileName=deadLetters.xml&amp;fileExist=Append" />
+    <spring:camelContext id="FIRST-CAMEL-CONTEXT" errorHandlerRef="deadLetterErrorHandler">
+
+        <spring:route>
+            <spring:from uri="file:src/data?noop=true"/>
+            <spring:onException>
+                <spring:exception>com.mysql.jdbc.exceptions.jdbc4.MySQLIntegrityConstraintViolationException</spring:exception>
+                <spring:redeliveryPolicy maximumRedeliveries="0"/>
+                <spring:rollback/>
+                <spring:to uri="file:src/data/error?fileName=deadLetters.xml&amp;fileExist=Append"/>
+            </spring:onException>
+            <spring:transacted ref="PROPAGATION_REQUIRED">
+            <spring:choice>
+                <spring:when>
+                    <spring:xpath>/persons/person</spring:xpath>
+                    <spring:log message="catch Persons"/>
+                    <spring:split>
+                        <spring:xpath>/persons/person</spring:xpath>
+                        <spring:log message="persons: ${body}"/>
+                        <spring:to uri="jms:queue.parts"/>
+                        <spring:bean ref="personToSql" method="toSql"/>
+                        <spring:to uri="jdbc:myDataSource"/>
+                    </spring:split>
+                </spring:when>
+                <spring:when>
+                    <spring:xpath>/person</spring:xpath>
+                    <spring:log message="catch Person ${body}"/>
+                    <spring:bean ref="personToSql" method="toSql"/>
+                    <spring:to uri="jms:queue.query-simple"/>
+                    <spring:to uri="jdbc:myDataSource"/>
+                </spring:when>
+            </spring:choice>
+            </spring:transacted>
+        </spring:route>
+    </spring:camelContext>
+
+
+
+</beans>

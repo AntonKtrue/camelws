@@ -1,0 +1,244 @@
+CamelTest.java
+package kaa.study;
+
+import bitronix.tm.TransactionManagerServices;
+import org.apache.camel.CamelContext;
+import org.apache.camel.component.jms.JmsComponent;
+import org.apache.camel.impl.DefaultCamelContext;
+import org.apache.camel.spring.SpringCamelContext;
+import org.apache.xbean.spring.context.ClassPathXmlApplicationContext;
+import org.springframework.context.ApplicationContext;
+import org.springframework.transaction.PlatformTransactionManager;
+
+import javax.jms.ConnectionFactory;
+
+public class CamelTest {
+
+    public static void main(String[] args) throws Exception {
+        ApplicationContext appContext = new ClassPathXmlApplicationContext("camel-context.xml");
+        ConnectionFactory connectionFactory = (ConnectionFactory) appContext.getBean("jmsConnectionFactory");
+        TransactionManagerServices tms = (TransactionManagerServices) appContext.getBean("transactionManager");
+        //bitronix.tm.BitronixTransactionManager;
+        JmsComponent component = JmsComponent.jmsComponent(connectionFactory);
+
+        component.setTransactionManager(transactionManager);
+        component.getConfiguration().setConcurrentConsumers(1);
+
+        CamelContext camelContext = new DefaultCamelContext();
+        camelContext.addComponent("jms", component);
+        camelContext.addRoutes(new TestRoute());
+        camelContext.start();
+        Thread.sleep(180000);
+        camelContext.stop();
+
+    }
+}
+GenerateRandomFiles.java
+package kaa.study;
+
+import java.io.BufferedWriter;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.Random;
+
+
+public class GenerateRandomFiles {
+
+    private static Random random = new Random();
+    public static void main(String[] args) throws IOException {
+        Path dir = Paths.get("src/data/files");
+        if(!Files.exists(dir)) {
+            Files.createDirectory(dir);
+        }
+
+        for(int i = 1; i < 300; i++) {
+            FileTypes type = FileTypes.getRandomType();
+            String typeText = type.toString().toLowerCase();
+            Path newFile = Paths.get(dir.toString(), Integer.toString(i) + "." + typeText);
+            Files.createFile(newFile);
+            writeFileContent(newFile, type);
+        }
+    }
+
+
+    private static void writeFileContent(Path file, FileTypes type) throws IOException {
+        FileWriter fw = new FileWriter(file.toFile());
+        BufferedWriter bw = new BufferedWriter(fw);
+        String content;
+        switch (type) {
+            case TXT:
+                content = "Text file: " + Double.toString(Math.random());
+                break;
+            case XML:
+                content = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" +
+                        "<data id=\"" + random.nextInt(Integer.MAX_VALUE) + "\">\n" +
+                        "  <value>" + Math.random() + "</value>\n" +
+                        "</data>";
+                break;
+            default:
+                content = "invalid file";
+        }
+        bw.write(content);
+        bw.close();
+        fw.close();
+    }
+
+    private enum FileTypes {
+        XML,
+        TXT,
+        OTHER;
+
+        public static FileTypes getRandomType() {
+            int ordinal = random.nextInt(FileTypes.values().length);
+            FileTypes val = FileTypes.values()[ordinal];
+            return val;
+        }
+   }
+}
+TestRoute.java
+package kaa.study;
+
+import org.apache.camel.Predicate;
+import org.apache.camel.builder.PredicateBuilder;
+import org.apache.camel.builder.RouteBuilder;
+
+
+public class TestRoute extends RouteBuilder {
+    Predicate txtPredicate = PredicateBuilder.toPredicate(simple("${file:name.ext} == 'txt'"));
+    Predicate xmlPredicate = PredicateBuilder.toPredicate(simple("${file:name.ext} == 'xml'"));
+
+    @Override
+    public void configure() throws Exception {
+        from("file:src/data/files")
+                .choice()
+                    //Если расширение xml то содержимое в очередь в брокере ActiveMQ
+                    .when(xmlPredicate)
+                        /*.to("file:src/data/sort/xml")*/
+                        .to("jms:a.test.queue.xml")
+                    .endChoice()
+                    .when(txtPredicate)
+                        /*.to("file:src/data/sort/txt")*/
+                        .to("jms:a.test.queue.txt")
+                        .bean(new TxtToSqlBean(), "toSql")
+                        .to("jms:a.test.queue.sql")
+                    .endChoice()
+
+                    .otherwise()
+                        /*.to("file:src/data/sort/invalid")*/
+                        .to("jms:a.test.queue.invalid-queue")
+                    .endChoice();
+
+    }
+}
+TxtToSqlBean.java
+package kaa.study;
+
+import org.apache.camel.Body;
+import org.apache.camel.Headers;
+
+import java.util.HashMap;
+
+public class TxtToSqlBean {
+    public String toSql(@Headers HashMap<String, String> properties, @Body String body) {
+
+        return "INSERT INTO table(fileName, body) VALUES ( '" +
+                properties.get("CamelFileName") + "', '" + body + "')";
+    }
+}
+camel-context.xml
+<?xml version="1.0" encoding="UTF-8"?>
+<beans xmlns="http://www.springframework.org/schema/beans"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:spring="http://camel.apache.org/schema/spring"
+       xsi:schemaLocation="http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans.xsd http://camel.apache.org/schema/spring http://camel.apache.org/schema/spring/camel-spring.xsd">
+    <!-- TX configuration -->
+    <bean id="jtaTransactionManager" class="org.springframework.transaction.jta.JtaTransactionManager">
+        <property name="transactionManager" ref="transactionManager"/>
+        <property name="userTransaction" ref="transactionManager"/>
+    </bean>
+    <bean id="btmConfig" factory-method="getConfiguration" class="bitronix.tm.TransactionManagerServices">
+        <property name="serverId" value="spring-btm"/>
+    </bean>
+    <bean id="transactionManager" factory-method="getTransactionManager" class="bitronix.tm.TransactionManagerServices"
+          depends-on="btmConfig" destroy-method="shutdown"/>
+    <bean id="PROPAGATION_REQUIRED" class="org.apache.camel.spring.spi.SpringTransactionPolicy">
+        <property name="transactionManager" ref="jtaTransactionManager"/>
+        <property name="propagationBehaviorName" value="PROPAGATION_REQUIRED"/>
+    </bean>
+    <!-- JMS configuration -->
+    <bean id="resourceManager" class="org.apache.activemq.pool.ActiveMQResourceManager" init-method="recoverResource">
+        <property name="transactionManager" ref="transactionManager"/>
+        <property name="connectionFactory" ref="pooledJmsXaConnectionFactory"/>
+        <property name="resourceName" value="activemq.default"/>
+    </bean>
+    <bean id="pooledJmsXaConnectionFactory" class="bitronix.tm.resource.jms.PoolingConnectionFactory" init-method="init"
+          destroy-method="close">
+        <property name="className" value="org.apache.activemq.ActiveMQXAConnectionFactory"/>
+        <property name="uniqueName" value="activemq"/>
+        <property name="maxPoolSize" value="8"/>
+        <property name="driverProperties">
+            <props>
+                <prop key="brokerURL">tcp://localhost:61616</prop>
+            </props>
+        </property>
+    </bean>
+    <bean id="activemqXa" class="org.apache.activemq.camel.component.ActiveMQComponent">
+        <!-- because of https://issues.apache.org/jira/browse/AMQ-3251, we cannot use the XaPooledConnectionFactory in AMQ 5.5.1 -->
+        <property name="connectionFactory" ref="pooledJmsXaConnectionFactory"/>
+        <property name="transacted" value="false"/>
+        <property name="transactionManager" ref="jtaTransactionManager"/>
+    </bean>
+    <!-- JMS configuration for test enqueue/dequeue without transactions -->
+    <bean id="jmsConnectionFactory" class="org.apache.activemq.ActiveMQConnectionFactory">
+        <property name="brokerURL" value="tcp://localhost:61616"/>
+    </bean>
+    <bean id="activemq" class="org.apache.activemq.camel.component.ActiveMQComponent">
+        <property name="connectionFactory" ref="jmsConnectionFactory"/>
+        <property name="transacted" value="false"/>
+    </bean>
+    <!-- JDBC configuration -->
+    <bean id="dataSource" class="bitronix.tm.resource.jdbc.PoolingDataSource" init-method="init" destroy-method="close">
+        <property name="uniqueName" value="testdb"/>
+        <property name="className" value="org.apache.derby.jdbc.EmbeddedXADataSource40"/>
+        <property name="maxPoolSize" value="5"/>
+        <property name="driverProperties">
+            <props>
+                <prop key="databaseName">testdb</prop>
+                <prop key="databaseName">target/testdb</prop>
+                <prop key="connectionAttributes">create=true</prop>
+            </props>
+        </property>
+    </bean>
+    <bean id="sql" class="org.apache.camel.component.sql.SqlComponent">
+        <property name="dataSource" ref="dataSource"/>
+    </bean>
+
+    <!-- Camel context -->
+    <bean id="textToSql" class="kaa.study.TxtToSqlBean"/>
+
+    <spring:camelContext id="camel">
+        <spring:route id="testRoute">
+            <spring:from uri="file:src/data/files?noop=true"/>
+            <spring:choice>
+                <spring:when>
+                    <spring:simple>${file:name.ext} == 'xml'</spring:simple>
+                    <spring:to uri="jms:a.test.queue.xml"/>
+                </spring:when>
+                <spring:when>
+                    <spring:simple>${file:name.ext} == 'txt'</spring:simple>
+                    <spring:to uri="jms:a.test.queue.txt"/>
+                    <spring:bean ref="textToSql" method="toSql"/>
+                    <spring:to uri="jms:a.test.queue.sql"/>
+                </spring:when>
+                <spring:otherwise>
+                    <spring:to uri="jms:a.test.queue.invalid-queue"/>
+                </spring:otherwise>
+            </spring:choice>
+        </spring:route>
+    </spring:camelContext>
+    <bean id="jms" class="org.apache.camel.component.jms.JmsComponent">
+        <property name="connectionFactory" ref="pooledJmsXaConnectionFactory"/>
+    </bean>
+</beans>
